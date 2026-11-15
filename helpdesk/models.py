@@ -24,6 +24,15 @@ JOB_KINDS = ["installation", "maintenance", "repair"]
 JOB_STATUSES = ["scheduled", "in_progress", "done", "cancelled"]
 TEXT_SIZES = ["normal", "large", "larger"]
 
+# How each role is written on the pages.
+ROLE_LABELS = {
+    "customer": "Customer",
+    "tier1": "Tier 1",
+    "tier2": "Tier 2",
+    "tier3": "Tier 3",
+    "manager": "Manager",
+}
+
 
 class Company(db.Model):
     """A small business that Netheret supports."""

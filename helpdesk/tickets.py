@@ -1,10 +1,19 @@
-"""Support requests (tickets): raising them, the queue and the detail page."""
-from flask import Blueprint, abort, g, redirect, render_template, request, url_for
+"""Support requests (tickets): raising them, the queue, the detail page and
+the actions staff take on a request (assign, escalate, update)."""
+from datetime import datetime
+
+from flask import Blueprint, abort, flash, g, redirect, render_template, request, url_for
 from sqlalchemy import case
 
 from .auth import login_required, role_required
 from .extensions import db
-from .models import CATEGORIES, PRIORITIES, STAFF_ROLES, STATUSES, TIERS, Company, Ticket, User
+from .models import (
+    CATEGORIES, PRIORITIES, STAFF_ROLES, STATUSES, TIERS, Company, Ticket, TicketUpdate, User,
+)
+
+# Only these roles may give a request to somebody else. Everybody else on
+# the staff can only take a request for themselves.
+ASSIGNING_ROLES = ["tier1", "manager"]
 
 bp = Blueprint("tickets", __name__)
 
@@ -130,4 +139,111 @@ def queue():
 @role_required(*STAFF_ROLES)
 def detail(ticket_id):
     ticket = db.get_or_404(Ticket, ticket_id)
-    return render_template("tickets/detail.html", ticket=ticket)
+    staff = db.session.scalars(
+        db.select(User).where(User.role.in_(STAFF_ROLES)).order_by(User.name)
+    ).all()
+    return render_template(
+        "tickets/detail.html", ticket=ticket, staff=staff, statuses=STATUSES,
+        higher_tiers=[tier for tier in TIERS if tier > ticket.tier],
+        can_assign=g.user.role in ASSIGNING_ROLES,
+    )
+
+
+def add_update(ticket, body, visible_to_customer, status_change=None):
+    """Write one entry on the request's timeline.
+
+    Every action calls this, so the timeline is a full history of the request.
+    """
+    db.session.add(TicketUpdate(
+        ticket=ticket, author=g.user, body=body,
+        visible_to_customer=visible_to_customer, status_change=status_change,
+    ))
+    # Adding an update counts as a change to the request.
+    ticket.updated_at = datetime.now()
+
+
+def change_status(ticket, new_status):
+    """Set a new status, and keep resolved_at in step with it."""
+    ticket.status = new_status
+    if new_status in ["resolved", "closed"]:
+        if ticket.resolved_at is None:
+            ticket.resolved_at = datetime.now()
+    else:
+        # Reopened: it is not resolved any more.
+        ticket.resolved_at = None
+
+
+@bp.route("/requests/<int:ticket_id>/assign", methods=["POST"])
+@role_required(*STAFF_ROLES)
+def assign(ticket_id):
+    ticket = db.get_or_404(Ticket, ticket_id)
+    person_id = request.form.get("assigned_to_id", "")
+    person = db.session.get(User, int(person_id)) if person_id.isdigit() else None
+    if person is None or not person.is_staff:
+        flash("Choose a member of staff to assign the request to.")
+        return redirect(url_for("tickets.detail", ticket_id=ticket.id))
+    # Engineers may take a request themselves but not hand it to others.
+    if g.user.role not in ASSIGNING_ROLES and person.id != g.user.id:
+        abort(403)
+
+    ticket.assigned_to = person
+    status_change = None
+    if ticket.status == "new":
+        # Somebody is now working on it, so it is no longer new.
+        change_status(ticket, "open")
+        status_change = "open"
+    add_update(ticket, f"Assigned to {person.name}.", False, status_change)
+    db.session.commit()
+    flash(f"{ticket.reference} is now assigned to {person.name}.")
+    return redirect(url_for("tickets.detail", ticket_id=ticket.id))
+
+
+@bp.route("/requests/<int:ticket_id>/escalate", methods=["POST"])
+@role_required(*STAFF_ROLES)
+def escalate(ticket_id):
+    ticket = db.get_or_404(Ticket, ticket_id)
+    new_tier = request.form.get("tier", "")
+    reason = request.form.get("reason", "").strip()
+    if not new_tier.isdigit() or int(new_tier) not in TIERS or int(new_tier) <= ticket.tier:
+        flash("Choose a higher tier to escalate to.")
+    elif not reason:
+        flash("Say why the request is being escalated, so the next tier knows.")
+    else:
+        old_tier = ticket.tier
+        ticket.tier = int(new_tier)
+        # Unassign it, so the next tier's engineers see it as waiting for them.
+        ticket.assigned_to = None
+        status_change = None
+        if ticket.status in ["new", "waiting"]:
+            change_status(ticket, "open")
+            status_change = "open"
+        add_update(ticket, f"Escalated from Tier {old_tier} to Tier {ticket.tier}: {reason}",
+                   False, status_change)
+        db.session.commit()
+        flash(f"{ticket.reference} escalated to Tier {ticket.tier}.")
+    return redirect(url_for("tickets.detail", ticket_id=ticket.id))
+
+
+@bp.route("/requests/<int:ticket_id>/updates", methods=["POST"])
+@role_required(*STAFF_ROLES)
+def add_staff_update(ticket_id):
+    """Add a note to the timeline, and change the status if asked."""
+    ticket = db.get_or_404(Ticket, ticket_id)
+    body = request.form.get("body", "").strip()
+    new_status = request.form.get("status", ticket.status)
+    # A checkbox is only sent when it is ticked.
+    visible = request.form.get("visible_to_customer") == "yes"
+
+    if new_status not in STATUSES:
+        flash("Choose a status from the list.")
+    elif not body:
+        flash("Write the update before saving it.")
+    else:
+        status_change = None
+        if new_status != ticket.status:
+            change_status(ticket, new_status)
+            status_change = new_status
+        add_update(ticket, body, visible, status_change)
+        db.session.commit()
+        flash("Update added.")
+    return redirect(url_for("tickets.detail", ticket_id=ticket.id))

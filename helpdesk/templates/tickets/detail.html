@@ -21,4 +21,102 @@
   <h2>Description</h2>
   {# pre-line keeps the line breaks the customer typed. #}
   <p class="keep-lines">{{ ticket.description }}</p>
+
+  <h2>Timeline</h2>
+  <ol class="timeline">
+    <li>
+      <p class="timeline-meta">{{ ticket.created_at|datetime }}, {{ ticket.raised_by.name }}</p>
+      <p>Request raised.</p>
+    </li>
+    {% for update in ticket.updates %}
+    <li class="{{ 'internal' if not update.visible_to_customer }}">
+      <p class="timeline-meta">
+        {{ update.created_at|datetime }}, {{ update.author.name }}
+        {% if update.visible_to_customer %}
+        <span class="tag">Customer can see this</span>
+        {% else %}
+        <span class="tag tag-internal">Internal note</span>
+        {% endif %}
+      </p>
+      {% if update.status_change %}
+      <p><strong>Status changed to {{ update.status_change }}.</strong></p>
+      {% endif %}
+      <p class="keep-lines">{{ update.body }}</p>
+    </li>
+    {% endfor %}
+  </ol>
+
+  <h2>Actions</h2>
+  <div class="actions">
+    <section class="card" aria-labelledby="assign-heading">
+      <h3 id="assign-heading">Assign</h3>
+      {% if can_assign %}
+      <form method="post" action="{{ url_for('tickets.assign', ticket_id=ticket.id) }}">
+        <div class="field">
+          <label for="assigned_to_id">Assign to</label>
+          <select id="assigned_to_id" name="assigned_to_id">
+            {% for person in staff %}
+            <option value="{{ person.id }}"{% if ticket.assigned_to_id == person.id %} selected{% endif %}>{{ person.name }} ({{ role_labels[person.role] }})</option>
+            {% endfor %}
+          </select>
+        </div>
+        <button type="submit">Assign</button>
+      </form>
+      {% elif ticket.assigned_to_id != g.user.id %}
+      <form method="post" action="{{ url_for('tickets.assign', ticket_id=ticket.id) }}">
+        <input type="hidden" name="assigned_to_id" value="{{ g.user.id }}">
+        <button type="submit">Take this request</button>
+      </form>
+      {% else %}
+      <p>This request is assigned to you.</p>
+      {% endif %}
+    </section>
+
+    <section class="card" aria-labelledby="escalate-heading">
+      <h3 id="escalate-heading">Escalate</h3>
+      {% if higher_tiers %}
+      <form method="post" action="{{ url_for('tickets.escalate', ticket_id=ticket.id) }}">
+        <div class="field">
+          <label for="tier">Escalate to</label>
+          <select id="tier" name="tier">
+            {% for tier in higher_tiers %}
+            <option value="{{ tier }}">Tier {{ tier }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="reason">Reason</label>
+          <span class="hint" id="reason-hint">What you tried, and why it needs the next tier.</span>
+          <textarea id="reason" name="reason" rows="3" aria-describedby="reason-hint" required></textarea>
+        </div>
+        <button type="submit">Escalate</button>
+      </form>
+      {% else %}
+      <p>This request is already at Tier 3, the highest tier.</p>
+      {% endif %}
+    </section>
+  </div>
+
+  <section aria-labelledby="update-heading">
+    <h3 id="update-heading">Add an update</h3>
+    <form method="post" action="{{ url_for('tickets.add_staff_update', ticket_id=ticket.id) }}">
+      <div class="field">
+        <label for="body">Update</label>
+        <textarea id="body" name="body" required></textarea>
+      </div>
+      <div class="field">
+        <label for="status">Status</label>
+        <select id="status" name="status">
+          {% for status in statuses %}
+          <option value="{{ status }}"{% if ticket.status == status %} selected{% endif %}>{{ status|capitalize }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field checkbox">
+        <input type="checkbox" id="visible_to_customer" name="visible_to_customer" value="yes">
+        <label for="visible_to_customer">The customer can see this update</label>
+      </div>
+      <button type="submit">Add update</button>
+    </form>
+  </section>
 {% endblock %}

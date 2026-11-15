@@ -34,6 +34,10 @@ def create_app():
     from . import filters
     filters.register(app)
 
+    # Values every template can use without being passed them.
+    from .models import ROLE_LABELS
+    app.jinja_env.globals["role_labels"] = ROLE_LABELS
+
     # Each part of the app is a blueprint: a group of pages in its own file.
     from . import auth, main, tickets
     app.register_blueprint(auth.bp)
